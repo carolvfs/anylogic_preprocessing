@@ -2,12 +2,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
-from cartopy.io import shapereader
 from matplotlib.lines import Line2D
 from cartopy.mpl.geoaxes import GeoAxes
 from typing import cast, Any
-import matplotlib.patches as mpatches
-from matplotlib.legend_handler import HandlerTuple
 from matplotlib.legend_handler import HandlerBase
 
 import matplotlib.image as mpimg
@@ -139,11 +136,50 @@ def get_stations(
 
     return filtered  
 
+from pathlib import Path
+from typing import List
+from shapely.geometry.base import BaseGeometry
+
+def load_geometries_any(path: str) -> List[BaseGeometry]:
+    """
+    Load route/boundary geometries from .geojson/.json/.shp/.zip.
+    Returns a list of Shapely geometries in EPSG:4326 (lon/lat).
+    Prefers GeoPandas for CRS-awareness; falls back to Cartopy shapereader
+    (assumes input already in lon/lat if GeoPandas not available).
+    """
+    ext = Path(path).suffix.lower()
+
+    # Try GeoPandas path (best: handles CRS & GeoJSON natively)
+    try:
+        import geopandas as gpd
+        gdf = gpd.read_file(path)
+        if gdf.crs is not None and gdf.crs.to_string().lower() not in ("epsg:4326", "wgs84"):
+            gdf = gdf.to_crs("EPSG:4326")
+        return list(gdf.geometry.dropna())
+    except Exception:
+        if ext in (".geojson", ".json"):
+            try:
+                import fiona
+                from shapely.geometry import shape
+                geoms = []
+                with fiona.open(path, "r") as src:
+                    crs = src.crs_wkt or src.crs
+                    for feat in src:
+                        geom = shape(feat["geometry"])
+                        geoms.append(geom)
+                return geoms
+            except Exception:
+                raise RuntimeError(
+                    "Reading GeoJSON requires geopandas or fiona. Please `conda install geopandas`."
+                )
+        else:
+            from cartopy.io import shapereader
+            return list(shapereader.Reader(path).geometries())
 
 def open_file(xlsx_path):
     return pd.ExcelFile(xlsx_path)
 
-def plot_map(df, shp_path, out_path):
+def plot_map(df, shp_path, out_path, battery_size=""):
 
     projection = ccrs.PlateCarree()
 
@@ -167,8 +203,7 @@ def plot_map(df, shp_path, out_path):
 
     
     # ######## # Route
-    shp_reader = shapereader.Reader(shp_path)
-    geometries = list(shp_reader.geometries())
+    geometries = load_geometries_any(shp_path)
     
     ax.add_geometries(
         geometries,
@@ -226,7 +261,7 @@ def plot_map(df, shp_path, out_path):
     handles: list[Any] = [
         Line2D([], [], color='black', lw=1.0, label='Routes'),
         Line2D([], [], marker="o", color="w", markerfacecolor="#666666",
-            markeredgecolor="none", markersize=6, label=f"Real EV Charging Stations (total of {n_real})"),
+            markeredgecolor="none", markersize=6, label=f"Real EV Charging Stations (battery size {battery_size}) Total: {n_real}"),
     ]
 
     labels: list[str] = [h.get_label() for h in handles]
@@ -234,19 +269,18 @@ def plot_map(df, shp_path, out_path):
     if mask_artificial.any():
         flag_handle = LegendImage()
         handles.append(flag_handle)
-        labels.append(f"Artificial EV Charging Stations (total of {n_artificial})")
+        labels.append(f"Artificial EV Charging Stations (battery size {battery_size}) Total: {n_artificial}")
 
     ax.legend(
         handles, labels,
         handler_map={LegendImage: HandlerImage("./input/flag.png", zoom=0.025)},
-        loc="upper right", fontsize=8, frameon=True, markerscale=0.9, labelspacing=0.8
+        loc="upper right", fontsize=6, frameon=True, markerscale=0.9, labelspacing=0.8
     )
     
        
     add_scalebar(ax, length_km=200, location=(0.1, 0.05))
     add_north_arrow_image(ax, "./input/north_arrow.png", location=(0.05, 0.06), zoom=0.035)
     # plt.show()
+
     fig.savefig(out_path, dpi=300, bbox_inches='tight')
     plt.close(fig)
-
-
